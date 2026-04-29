@@ -241,7 +241,8 @@ class EnvController extends Controller
         $blockStr = implode("\n", $block) . "\n";
 
         foreach ($pools as $pool) {
-            $current = (string) shell_exec('sudo cat ' . escapeshellarg($pool) . ' 2>/dev/null');
+            // Pool confs are world-readable (mode 644) — no sudo needed.
+            $current = (string) @file_get_contents($pool);
             if ('' === $current) {
                 continue;
             }
