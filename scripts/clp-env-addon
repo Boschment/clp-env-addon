@@ -108,7 +108,7 @@ install_sudoers() {
     # Narrow sudo grants for the clp (web UI) user.
     cat > "$SUDOERS_FILE" << 'SUDO'
 # CloudPanel Env Variables Addon
-clp ALL=(root) NOPASSWD: /usr/bin/install, /usr/bin/tee, /bin/systemctl reload php*-fpm, /bin/systemctl reload php*-fpm.service, /usr/local/bin/clp-env-pm2-reload
+clp ALL=(root) NOPASSWD: /usr/bin/install, /usr/bin/tee, /usr/bin/systemctl reload php*-fpm, /usr/bin/systemctl reload php*-fpm.service, /bin/systemctl reload php*-fpm, /bin/systemctl reload php*-fpm.service, /usr/local/bin/clp-env-pm2-reload
 SUDO
     chmod 440 "$SUDOERS_FILE"
     # Validate; if invalid, remove so we don't lock anything out.
