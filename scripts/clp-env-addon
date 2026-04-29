@@ -1,4 +1,8 @@
 #!/bin/bash
+# Wrap entire script in a brace-group so bash parses the whole file before
+# executing any of it. This prevents corruption when `install` replaces
+# /usr/local/bin/clp-env-addon (i.e. ourselves) mid-run.
+{
 set -e
 
 # CloudPanel Env Variables Addon
@@ -165,11 +169,10 @@ cmd_install() {
     clear_cache
     install_apt_hook
 
-    cp "$ADDON_DIR/scripts/clp-env-addon" /usr/local/bin/clp-env-addon
-    chmod +x /usr/local/bin/clp-env-addon
-    cp "$ADDON_DIR/scripts/clp-env-pm2-reload" /usr/local/bin/clp-env-pm2-reload
-    chmod 755 /usr/local/bin/clp-env-pm2-reload
-    chown root:root /usr/local/bin/clp-env-pm2-reload
+    # Use `install` (atomic: temp file + rename) so the running script's
+    # file descriptor remains valid even though we are overwriting ourselves.
+    install -m 755 -o root -g root "$ADDON_DIR/scripts/clp-env-addon"     /usr/local/bin/clp-env-addon
+    install -m 755 -o root -g root "$ADDON_DIR/scripts/clp-env-pm2-reload" /usr/local/bin/clp-env-pm2-reload
 
     echo ""
     log_ok "Installation complete!"
@@ -270,3 +273,5 @@ case "${1:-}" in
         echo ""
         ;;
 esac
+exit $?
+}
