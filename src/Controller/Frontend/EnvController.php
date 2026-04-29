@@ -133,10 +133,11 @@ class EnvController extends Controller
         }
         [$siteUser, $siteRoot] = $resolved;
 
-        $hasPhp = $this->siteHasPhpFpm($siteUser);
+        $pools  = $this->findPoolsFor($siteUser, $domainName);
+        $hasPhp = !empty($pools);
 
         if ($hasPhp) {
-            $this->updatePhpFpmPools($vars, $siteUser);
+            $this->updatePhpFpmPools($vars, $pools);
         }
 
         // The PM2 helper detects pm2 itself and exits 10 if not installed,
@@ -148,10 +149,20 @@ class EnvController extends Controller
         }
     }
 
-    private function siteHasPhpFpm(string $siteUser): bool
+    /**
+     * Locate all PHP-FPM pool conf files belonging to this site.
+     * CloudPanel's pool naming has shifted between versions — older builds
+     * use <siteUser>.conf, newer ones use <domain>.conf — so we glob both.
+     *
+     * @return string[] absolute paths to pool .conf files
+     */
+    private function findPoolsFor(string $siteUser, string $domainName): array
     {
-        $pools = glob(sprintf(self::POOL_GLOB, $siteUser));
-        return is_array($pools) && count($pools) > 0;
+        $pools = array_merge(
+            glob(sprintf(self::POOL_GLOB, $domainName)) ?: [],
+            glob(sprintf(self::POOL_GLOB, $siteUser))   ?: []
+        );
+        return array_values(array_unique($pools));
     }
 
     private function resolveSite(string $domainName): ?array
@@ -214,14 +225,10 @@ class EnvController extends Controller
         }
     }
 
-    private function updatePhpFpmPools(array $vars, ?string $siteUser): void
+    /** @param string[] $pools */
+    private function updatePhpFpmPools(array $vars, array $pools): void
     {
-        if (null === $siteUser || '' === $siteUser) {
-            return;
-        }
-
-        $pools = glob(sprintf(self::POOL_GLOB, $siteUser));
-        if (!$pools) {
+        if (empty($pools)) {
             return;
         }
 
