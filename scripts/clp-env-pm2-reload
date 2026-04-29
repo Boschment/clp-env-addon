@@ -1,0 +1,82 @@
+#!/bin/bash
+# clp-env-pm2-reload <domain> <siteUser> <siteRoot>
+#
+# Pushes the site's stored env vars into its PM2 processes without ever
+# writing a .env or ecosystem file. Reads from /opt/clp-env-addon/data/<domain>.json,
+# auto-discovers PM2 apps for the site user whose cwd is under siteRoot,
+# and runs `pm2 restart <app> --update-env` with the vars exported in the
+# subshell.
+#
+# Invoked by EnvController via sudo. Designed to be idempotent and quiet.
+set -u
+
+DOMAIN="${1:-}"
+SITE_USER="${2:-}"
+SITE_ROOT="${3:-}"
+
+ADDON_DIR="/opt/clp-env-addon"
+DATA_FILE="$ADDON_DIR/data/$DOMAIN.json"
+
+[ -z "$DOMAIN" ]    && { echo "missing domain"    >&2; exit 2; }
+[ -z "$SITE_USER" ] && { echo "missing site user" >&2; exit 2; }
+[ -z "$SITE_ROOT" ] && { echo "missing site root" >&2; exit 2; }
+
+# Refuse anything fishy.
+case "$DOMAIN"    in *..*|*/*) echo "bad domain"    >&2; exit 2;; esac
+case "$SITE_USER" in *..*|*/*) echo "bad site user" >&2; exit 2;; esac
+case "$SITE_ROOT" in /home/*) ;; *) echo "bad site root" >&2; exit 2;; esac
+
+# Exit codes:
+#   0  = pm2 present, restart attempted (possibly zero apps matched)
+#   10 = pm2 not installed for this site user
+#   11 = pm2 present but no apps under the site root
+#   2  = bad arguments
+
+# Detect pm2 for the site user (resolves PATH / nvm shims via login shell).
+PM2_PATH="$(sudo -u "$SITE_USER" -H bash -lc 'command -v pm2' 2>/dev/null || true)"
+[ -z "$PM2_PATH" ] && exit 10
+
+[ -f "$DATA_FILE" ] || exit 0
+
+# Fetch PM2 process list for the site user.
+APPS_JSON="$(sudo -u "$SITE_USER" -H bash -lc 'pm2 jlist' 2>/dev/null || true)"
+[ -z "$APPS_JSON" ] && exit 11
+[ "$APPS_JSON" = "[]" ] && exit 11
+
+# Extract names of PM2 apps whose working dir is inside the site root.
+APP_NAMES="$(python3 - "$SITE_ROOT" <<PYEOF
+import json, sys
+root = sys.argv[1].rstrip('/') + '/'
+try:
+    procs = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+seen = set()
+for p in procs:
+    cwd = (p.get('pm2_env', {}) or {}).get('pm_cwd') or ''
+    if (cwd + '/').startswith(root) and p.get('name') not in seen:
+        print(p['name'])
+        seen.add(p['name'])
+PYEOF
+<<< "$APPS_JSON")"
+
+[ -z "$APP_NAMES" ] && exit 11
+
+# Build a sequence of `export KEY=value` lines from the JSON store.
+EXPORTS="$(python3 - "$DATA_FILE" <<'PYEOF'
+import json, shlex, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+for k, v in data.items():
+    print(f"export {k}={shlex.quote(str(v))}")
+PYEOF
+)"
+
+# Restart each matching app with vars present in its environment.
+while IFS= read -r APP; do
+    [ -z "$APP" ] && continue
+    sudo -u "$SITE_USER" -H bash -c "$EXPORTS
+pm2 restart $(printf %q "$APP") --update-env >/dev/null 2>&1" || true
+done <<< "$APP_NAMES"
+
+exit 0
