@@ -12,9 +12,6 @@ use App\Service\Logger;
 class EnvController extends Controller
 {
     private const DATA_DIR = '/opt/clp-env-addon/data';
-    private const POOL_GLOB = '/etc/php/*/fpm/pool.d/%s.conf';
-    private const BLOCK_BEGIN = '; BEGIN clp-env-addon';
-    private const BLOCK_END   = '; END clp-env-addon';
 
     private SiteManager $siteEntityManager;
 
@@ -62,7 +59,7 @@ class EnvController extends Controller
         $vars = $this->loadVariables($domainName);
         $vars[$key] = $value;
         $this->saveVariables($domainName, $vars);
-        $this->applyVariables($domainName, $vars);
+        $this->applyVariables($domainName);
 
         $this->addFlash('success', sprintf('Variable %s saved.', $key));
         return $this->redirect($this->generateUrl('clp_site_env', ['domainName' => $domainName]));
@@ -83,7 +80,7 @@ class EnvController extends Controller
         if (isset($vars[$key])) {
             unset($vars[$key]);
             $this->saveVariables($domainName, $vars);
-            $this->applyVariables($domainName, $vars);
+            $this->applyVariables($domainName);
             $this->addFlash('success', sprintf('Variable %s removed.', $key));
         }
 
@@ -117,52 +114,32 @@ class EnvController extends Controller
         );
     }
 
-    /**
-     * Apply variables to the site, only to the runtimes actually present:
-     *   - PHP-FPM pool (if a pool conf exists for this site user): write
-     *     env[KEY]="value" block, then reload php-fpm.
-     *   - PM2 (if pm2 is installed for the site user): restart any PM2 apps
-     *     whose cwd is under the site root, with vars exported in the restart
-     *     shell. No .env or ecosystem file is written.
-     */
-    private function applyVariables(string $domainName, array $vars): void
+    private function applyVariables(string $domainName): void
     {
-        $resolved = $this->resolveSite($domainName);
-        if (null === $resolved) {
-            return;
-        }
-        [$siteUser, $siteRoot] = $resolved;
+        $phpStatus = $this->updatePhpPool($domainName);
 
-        $pools  = $this->findPoolsFor($siteUser, $domainName);
-        $hasPhp = !empty($pools);
-
-        if ($hasPhp) {
-            $this->updatePhpFpmPools($vars, $pools);
+        $resolved  = $this->resolveSite($domainName);
+        $pm2Status = 10;
+        if (null !== $resolved) {
+            [$siteUser, $siteRoot] = $resolved;
+            $pm2Status = $this->reloadPm2($domainName, $siteUser, $siteRoot);
         }
 
-        // The PM2 helper detects pm2 itself and exits 10 if not installed,
-        // 11 if installed but no matching apps, 0 if it restarted something.
-        $pm2Status = $this->reloadPm2($domainName, $siteUser, $siteRoot);
-
-        if (!$hasPhp && 10 === $pm2Status) {
-            $this->addFlash('warning', 'Variable saved, but neither a PHP-FPM pool nor PM2 was detected for this site — nothing was applied to a running runtime.');
+        if (3 === $phpStatus && 10 === $pm2Status) {
+            $this->addFlash('warning', 'Variable saved, but neither a PHP-FPM pool nor PM2 was detected — nothing was applied to a running runtime.');
         }
     }
 
-    /**
-     * Locate all PHP-FPM pool conf files belonging to this site.
-     * CloudPanel's pool naming has shifted between versions — older builds
-     * use <siteUser>.conf, newer ones use <domain>.conf — so we glob both.
-     *
-     * @return string[] absolute paths to pool .conf files
-     */
-    private function findPoolsFor(string $siteUser, string $domainName): array
+    private function updatePhpPool(string $domainName): int
     {
-        $pools = array_merge(
-            glob(sprintf(self::POOL_GLOB, $domainName)) ?: [],
-            glob(sprintf(self::POOL_GLOB, $siteUser))   ?: []
-        );
-        return array_values(array_unique($pools));
+        $cmd = sprintf('sudo /usr/local/bin/clp-env-pool-update %s 2>&1', escapeshellarg($domainName));
+        exec($cmd, $out, $rc);
+
+        if (!in_array($rc, [0, 3], true)) {
+            $this->addFlash('warning', 'PHP-FPM pool update exited with ' . $rc . ': ' . implode(' ', $out));
+        }
+
+        return $rc;
     }
 
     private function resolveSite(string $domainName): ?array
@@ -203,63 +180,5 @@ class EnvController extends Controller
         return $rc;
     }
 
-    private function writeAsUser(string $destPath, string $contents, string $owner, string $mode): void
-    {
-        $tmp = tempnam(sys_get_temp_dir(), 'clpenv_');
-        file_put_contents($tmp, $contents);
-
-        // Use install(1) to atomically move with correct owner+mode.
-        $cmd = sprintf(
-            'sudo install -o %s -g %s -m %s %s %s',
-            escapeshellarg($owner),
-            escapeshellarg($owner),
-            escapeshellarg($mode),
-            escapeshellarg($tmp),
-            escapeshellarg($destPath)
-        );
-        exec($cmd . ' 2>&1', $out, $rc);
-        @unlink($tmp);
-
-        if (0 !== $rc) {
-            $this->addFlash('warning', 'Could not write ' . $destPath . ': ' . implode(' ', $out));
-        }
-    }
-
-    /** @param string[] $pools */
-    private function updatePhpFpmPools(array $vars, array $pools): void
-    {
-        if (empty($pools)) {
-            return;
-        }
-
-        $block = [self::BLOCK_BEGIN];
-        foreach ($vars as $key => $value) {
-            $escaped = str_replace(['\\', '"'], ['\\\\', '\\"'], (string) $value);
-            $block[] = sprintf('env[%s] = "%s"', $key, $escaped);
-        }
-        $block[] = self::BLOCK_END;
-        $blockStr = implode("\n", $block) . "\n";
-
-        foreach ($pools as $pool) {
-            // Pool confs are world-readable (mode 644) — no sudo needed.
-            $current = (string) @file_get_contents($pool);
-            if ('' === $current) {
-                continue;
-            }
-
-            $pattern = '/' . preg_quote(self::BLOCK_BEGIN, '/') . '.*?' . preg_quote(self::BLOCK_END, '/') . "\n?/s";
-            if (preg_match($pattern, $current)) {
-                $updated = preg_replace($pattern, $blockStr, $current);
-            } else {
-                $updated = rtrim($current, "\n") . "\n\n" . $blockStr;
-            }
-
-            $this->writeAsUser($pool, $updated, 'root', '0644');
-
-            if (preg_match('#/etc/php/([0-9.]+)/fpm/#', $pool, $m)) {
-                $service = 'php' . $m[1] . '-fpm';
-                exec('sudo systemctl reload ' . escapeshellarg($service) . ' 2>&1');
-            }
-        }
-    }
 }
+

@@ -112,7 +112,7 @@ install_sudoers() {
     # Narrow sudo grants for the clp (web UI) user.
     cat > "$SUDOERS_FILE" << 'SUDO'
 # CloudPanel Env Variables Addon
-clp ALL=(root) NOPASSWD: /usr/bin/install, /usr/bin/tee, /usr/bin/systemctl reload php*-fpm, /usr/bin/systemctl reload php*-fpm.service, /bin/systemctl reload php*-fpm, /bin/systemctl reload php*-fpm.service, /usr/local/bin/clp-env-pm2-reload
+clp ALL=(root) NOPASSWD: /usr/local/bin/clp-env-pool-update, /usr/local/bin/clp-env-pm2-reload
 SUDO
     chmod 440 "$SUDOERS_FILE"
     # Validate; if invalid, remove so we don't lock anything out.
@@ -171,8 +171,9 @@ cmd_install() {
 
     # Use `install` (atomic: temp file + rename) so the running script's
     # file descriptor remains valid even though we are overwriting ourselves.
-    install -m 755 -o root -g root "$ADDON_DIR/scripts/clp-env-addon"     /usr/local/bin/clp-env-addon
-    install -m 755 -o root -g root "$ADDON_DIR/scripts/clp-env-pm2-reload" /usr/local/bin/clp-env-pm2-reload
+    install -m 755 -o root -g root "$ADDON_DIR/scripts/clp-env-addon"        /usr/local/bin/clp-env-addon
+    install -m 755 -o root -g root "$ADDON_DIR/scripts/clp-env-pm2-reload"   /usr/local/bin/clp-env-pm2-reload
+    install -m 755 -o root -g root "$ADDON_DIR/scripts/clp-env-pool-update"  /usr/local/bin/clp-env-pool-update
 
     echo ""
     log_ok "Installation complete!"
@@ -219,7 +220,8 @@ cmd_check() {
     [ -f "$CLP_CSS/env.css" ]                  && log_ok "env.css present"            || { log_err "env.css MISSING"; all_ok=false; }
     grep -q "clp_site_env" "$CLP_ROUTES" 2>/dev/null && log_ok "Routes configured"    || { log_err "Routes MISSING"; all_ok=false; }
     grep -q "clp_site_env" "$TAB_TEMPLATE" 2>/dev/null && log_ok "Variables tab present" || { log_err "Variables tab MISSING"; all_ok=false; }
-    [ -f "/etc/apt/apt.conf.d/99-clp-env-addon" ] && log_ok "APT hook installed"      || log_warn "APT hook not installed"
+    [ -f "/etc/apt/apt.conf.d/99-clp-env-addon" ]       && log_ok "APT hook installed"          || log_warn "APT hook not installed"
+    [ -f "/usr/local/bin/clp-env-pool-update" ]         && log_ok "Pool update helper present"   || { log_err "Pool update helper MISSING"; all_ok=false; }
     [ -d "$DATA_DIR" ]                         && log_ok "Data directory present"     || { log_err "Data directory MISSING"; all_ok=false; }
 
     echo ""
@@ -246,6 +248,7 @@ cmd_uninstall() {
     rm -f /etc/apt/apt.conf.d/99-clp-env-addon
     rm -f "$SUDOERS_FILE"
     rm -f /usr/local/bin/clp-env-pm2-reload
+    rm -f /usr/local/bin/clp-env-pool-update
 
     clear_cache
 

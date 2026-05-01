@@ -1,0 +1,73 @@
+#!/bin/bash
+# clp-env-pool-update <domain>
+#
+# Runs as root (via sudo). Reads stored env vars from the addon data file,
+# finds all PHP-FPM pool conf files for the domain, updates the env[] block,
+# and reloads the affected php-fpm services.
+#
+# Exit codes:
+#   0 = pool(s) updated and php-fpm reloaded
+#   2 = bad/missing arguments
+#   3 = no pool conf files found (not a PHP site)
+set -euo pipefail
+
+DOMAIN="${1:-}"
+[ -z "$DOMAIN" ] && { echo "missing domain" >&2; exit 2; }
+case "$DOMAIN" in *..*|*/*) echo "bad domain" >&2; exit 2 ;; esac
+
+DATA_FILE="/opt/clp-env-addon/data/${DOMAIN}.json"
+[ -f "$DATA_FILE" ] || exit 0
+
+python3 - "$DOMAIN" "$DATA_FILE" <<'PYEOF'
+import json, re, sys, glob, subprocess
+
+domain    = sys.argv[1]
+data_file = sys.argv[2]
+
+with open(data_file) as f:
+    data = json.load(f)
+
+# Resolve the site's system user so we can match <siteUser>.conf pools too.
+roots = glob.glob(f'/home/*/htdocs/{domain}')
+site_user = None
+if roots:
+    site_user = subprocess.check_output(
+        ['stat', '-c', '%U', roots[0]]
+    ).decode().strip()
+
+pools = sorted(set(
+    glob.glob(f'/etc/php/*/fpm/pool.d/{domain}.conf') +
+    (glob.glob(f'/etc/php/*/fpm/pool.d/{site_user}.conf') if site_user else [])
+))
+
+if not pools:
+    sys.exit(3)
+
+lines = ['; BEGIN clp-env-addon']
+for k, v in data.items():
+    escaped = str(v).replace('\\', '\\\\').replace('"', '\\"')
+    lines.append(f'env[{k}] = "{escaped}"')
+lines.append('; END clp-env-addon')
+block = '\n'.join(lines) + '\n'
+
+pattern = re.compile(r'; BEGIN clp-env-addon.*?; END clp-env-addon\n?', re.DOTALL)
+
+for pool in pools:
+    with open(pool) as f:
+        current = f.read()
+
+    if '; BEGIN clp-env-addon' in current:
+        updated = pattern.sub(block, current)
+    else:
+        updated = current.rstrip('\n') + '\n\n' + block
+
+    with open(pool, 'w') as f:
+        f.write(updated)
+
+    m = re.search(r'/etc/php/([0-9.]+)/fpm/', pool)
+    if m:
+        subprocess.run(
+            ['systemctl', 'reload', f'php{m.group(1)}-fpm'],
+            capture_output=True
+        )
+PYEOF
